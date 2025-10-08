@@ -1,0 +1,15 @@
+{
+    "files.associations": {
+        "*.ino": "cpp",
+        "functional": "cpp",
+        "array": "cpp",
+        "tuple": "cpp",
+        "type_traits": "cpp",
+        "utility": "cpp"
+    },
+    "idf.pythonInstallPath": "C:\\Users\\NguyenThanhDat\\.espressif\\tools\\idf-python\\3.11.2\\python.exe",
+    "C_Cpp.clang_format_style": "{ BreakBeforeBraces: Attach, ColumnLimit: 0, SortIncludes: false }",
+    "cmake.ignoreCMakeListsMissing": true,
+    "idf.showOnboardingOnInit": false,
+    "idf.enableStatusBar": false
+}
