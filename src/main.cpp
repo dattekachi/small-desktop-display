@@ -1,23 +1,24 @@
-#define Version "SDD V1.4"
+#define Version "SDD V1.5"
 
-#include "ArduinoJson.h"
-#include <TimeLib.h>
+#include <ArduinoJson.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WebServer.h>
-#include <WiFiUdp.h>
 #include <ESP8266mDNS.h>
 #include <WiFiManager.h>
-#include <TFT_eSPI.h>
+#include "TFT_eSPI.h"
 #include <SPI.h>
 #include <TJpg_Decoder.h>
 #include <EEPROM.h>
-#include "number.h"
-#include "weathernum.h"
 
 // Font library and image library
-#include "font/ZdyLwFont_20.h"
-#include "img/misaka.h"
+#include "weathernum.h"
+
+#include "font/dateFont_20.h"
+#include "font/timeFont_85.h"
+#include "font/timeFont_42.h"
 #include "img/temperature.h"
 #include "img/humidity.h"
 
@@ -32,41 +33,39 @@
 #include "img/pangzi/i8.h"
 #include "img/pangzi/i9.h"
 
-#define LCD_BL_PIN 5 // LCD backlight pin
+#define LCD_BL_PIN 5
 
-#define WebSever_EN 1 // Web server enable flag - WiFi sleep function will be disabled when enabled
-WiFiManager wm; // global wm instance
+#define WebSever_EN 0
+WiFiManager wm;
 
-int Anim = 0;      // Astronaut icon display pointer record
-int AprevTime = 0; // Astronaut update time record
+int Anim = 0;
+int AprevTime = 0;
 
 // Parameter Settings
 struct config_type {
-  char stassid[32]; // Define WIFI name length obtained from configuration (max 32 bytes)
-  char stapsw[64];  // Define WIFI password length obtained from configuration (max 64 bytes)
+  char stassid[32];
+  char stapsw[64];
 };
 
-// If WEB configuration is enabled, no need to set parameters here. First one is wifi ssid, second is password
 config_type wificonf = {{""}, {""}};
-unsigned long updateweater_time = 10; // Weather update time X minutes
-int LCD_BL_PWM = 80;                  // Screen brightness 0-100, default 80
+unsigned long updateweater_time = 20;
+int LCD_BL_PWM = 80;
 
 // OpenWeatherMap API configuration
-String cityName = "Saigon";           // City name for OpenWeatherMap (e.g., "Hanoi", "Saigon", "Da Nang")
-String apiKey = "12aab1a35807dfc547f54288dbf91f3b"; // OpenWeatherMap API key - Get free key at: https://openweathermap.org/api
-String weatherLang = "en";            // Language: vi (Vietnamese), en (English), zh_cn (Chinese)
+String cityName = "Saigon";
+String apiKey = "12aab1a35807dfc547f54288dbf91f3b";
+String weatherLang = "en";
 
 // LCD screen related settings
-TFT_eSPI tft = TFT_eSPI(); // Please configure pins in User_Setup.h file of tft_espi library
+TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite clk = TFT_eSprite(&tft);
 uint16_t bgColor = 0x0000;
 
 // Other status flags
-uint8_t Wifi_en = 1;         // wifi status flag  1: On    0: Off
-uint8_t UpdateWeater_en = 0; // Update time flag
-int prevTime = 0;            // Scrolling display update flag
+uint8_t Wifi_en = 1;
+int prevTime = 0;
 
-// EEPROM parameter storage address bits (optimized layout)
+// EEPROM parameter storage address bits
 int BL_addr = 0;    // Brightness (1 byte)
 int UpWeT_addr = 1; // Weather update time (1 byte)
 int wifi_addr = 2;  // WiFi SSID+Password (96 bytes: 32+64)
@@ -74,53 +73,46 @@ int CN_addr = 98;   // City name (31 bytes max with null terminator)
 int API_addr = 129; // API key (41 bytes max with null terminator)
 
 time_t prevDisplay = 0;       // Display time display record
-unsigned long weaterTime = 0; // Weather update time record
-
-/*** Component objects ***/
-Number dig;
+unsigned long weatherTime = 0; // Weather update time record
+int weatherUpdateCount = 0;    // Counter for NTP sync (sync every 2 weather updates)
 WeatherNum wrat;
-uint32_t targetTime = 0;
 
-int tempnum = 0;      // Temperature percentage
-int huminum = 0;      // Humidity percentage
-int tempcol = 0xffff; // Temperature display color
-int humicol = 0xffff; // Humidity display color
+int tempnum = 0;
+int huminum = 0;
+int tempcol = 0xffff;
+int humicol = 0xffff;
 
 // Web server
-ESP8266WebServer server(80); // Create esp8266 web server object
+ESP8266WebServer server(80);
 
-// NTP server parameters
-static const char ntpServerName[] = "asia.pool.ntp.org";
-const int timeZone = 7; // GMT+7 timezone
-
-// WiFi connection UDP setting parameters
-WiFiUDP Udp;
+// NTP client setup
+WiFiUDP ntpUDP;
 WiFiClient wificlient;
-unsigned int localPort = 8000;
+NTPClient timeClient(ntpUDP, "asia.pool.ntp.org", 7 * 3600);
 
-// Function declarations
-String week();
-String monthDay();
-
-time_t getNtpTime();
-void digitalClockDisplay(int reflash_en);
-void sendNTPpacket(IPAddress &address);
-void LCD_reflash(int en);
-void savewificonfig();
-void readwificonfig();
-void deletewificonfig();
-void scrollBanner();
-void imgAnim();
-#if WebSever_EN
-void Web_Sever_Init();
-void Web_Sever();
-#endif
-void saveParamCallback();
-void saveCityNametoEEP(String cityname);
-void readCityNamefromEEP();
-void saveApiKeytoEEP(String key);
-void readApiKeyfromEEP();
-void getWeatherDataFromOpenWeatherMap();
+// TimeLib compatibility wrappers
+int hour() { return timeClient.getHours(); }
+int minute() { return timeClient.getMinutes(); }
+int second() { return timeClient.getSeconds(); }
+int day() {
+  time_t rawtime = timeClient.getEpochTime();
+  struct tm *ti = localtime(&rawtime);
+  return ti->tm_mday;
+}
+int month() {
+  time_t rawtime = timeClient.getEpochTime();
+  struct tm *ti = localtime(&rawtime);
+  return ti->tm_mon + 1;
+}
+int year() {
+  time_t rawtime = timeClient.getEpochTime();
+  struct tm *ti = localtime(&rawtime);
+  return ti->tm_year + 1900;
+}
+int weekday() {
+  return timeClient.getDay() + 1; // NTPClient uses 0=Sunday
+}
+time_t now() { return timeClient.getEpochTime(); }
 
 // Clear EEPROM area (helper function)
 void clearEEPROMArea(int startAddr, int length) {
@@ -162,6 +154,8 @@ void readCityNamefromEEP() {
   String readCity = String(buffer);
   if (readCity.length() > 0 && readCity.length() < 30) {
     cityName = readCity;
+  } else {
+    cityName = "Saigon"; // Default city
   }
 }
 
@@ -201,21 +195,10 @@ void readApiKeyfromEEP() {
 
 // wifi ssid, psw save to eeprom
 void savewificonfig() {
-  // Start writing
+  clearEEPROMArea(wifi_addr, 96);
+
   uint8_t *p = (uint8_t *)(&wificonf);
   for (size_t i = 0; i < sizeof(wificonf); i++) {
-    EEPROM.write(i + wifi_addr, *(p + i)); // Simulate write in flash memory
-  }
-  delay(10);
-  EEPROM.commit(); // Execute write to ROM
-  delay(10);
-}
-
-// Delete existing information in eeprom
-void deletewificonfig() {
-  config_type deletewifi = {{""}, {""}};
-  uint8_t *p = (uint8_t *)(&deletewifi);
-  for (size_t i = 0; i < sizeof(deletewifi); i++) {
     EEPROM.write(i + wifi_addr, *(p + i)); // Simulate write in flash memory
   }
   delay(10);
@@ -233,7 +216,6 @@ void readwificonfig() {
   Serial.printf("Read WiFi Config.....\r\n");
   Serial.printf("SSID:%s\r\n", wificonf.stassid);
   Serial.printf("PSW:%s\r\n", wificonf.stapsw);
-  Serial.printf("Connecting.....\r\n");
 }
 
 // TFT screen output function
@@ -267,6 +249,17 @@ void loading(byte delayTime) // Draw progress bar
   delay(delayTime);
 }
 
+// Temperature icon display function
+void tempWin() {
+  clk.setColorDepth(8);
+  clk.createSprite(52, 6);                         // Create window
+  clk.fillSprite(0x0000);                          // Fill rate
+  clk.drawRoundRect(0, 0, 52, 6, 3, 0xFFFF);       // Hollow rounded rectangle  start position x,y, length, width, arc radius, color
+  clk.fillRoundRect(1, 1, tempnum, 4, 2, tempcol); // Solid rounded rectangle
+  clk.pushSprite(45, 220);                         // Window position
+  clk.deleteSprite();
+}
+
 // Humidity icon display function
 void humidityWin() {
   clk.setColorDepth(8);
@@ -275,18 +268,7 @@ void humidityWin() {
   clk.fillSprite(0x0000);                          // Fill rate
   clk.drawRoundRect(0, 0, 52, 6, 3, 0xFFFF);       // Hollow rounded rectangle  start position x,y, length, width, arc radius, color
   clk.fillRoundRect(1, 1, huminum, 4, 2, humicol); // Solid rounded rectangle
-  clk.pushSprite(45, 242);                         // Window position
-  clk.deleteSprite();
-}
-
-// Temperature icon display function
-void tempWin() {
-  clk.setColorDepth(8);
-  clk.createSprite(52, 6);                         // Create window
-  clk.fillSprite(0x0000);                          // Fill rate
-  clk.drawRoundRect(0, 0, 52, 6, 3, 0xFFFF);       // Hollow rounded rectangle  start position x,y, length, width, arc radius, color
-  clk.fillRoundRect(1, 1, tempnum, 4, 2, tempcol); // Solid rounded rectangle
-  clk.pushSprite(45, 212);                         // Window position
+  clk.pushSprite(45, 250);                         // Window position
   clk.deleteSprite();
 }
 
@@ -441,6 +423,58 @@ void Web_win() {
   clk.deleteSprite();
 }
 
+String getParam(String name) {
+  // read parameter from server, for customhmtl input
+  String value;
+  if (wm.server->hasArg(name)) {
+    value = wm.server->arg(name);
+  }
+  return value;
+}
+
+void saveParamCallback() {
+  Serial.println("[CALLBACK] saveParamCallback fired");
+
+  // Save data obtained from the page
+  updateweater_time = getParam("WeaterUpdateTime").toInt();
+  cityName = getParam("CityName");
+  apiKey = getParam("APIKey");
+  LCD_BL_PWM = getParam("LCDBL").toInt();
+
+  // Process the obtained data
+  // City name
+  Serial.print("City Name = ");
+  Serial.println(cityName);
+  if (cityName.length() > 0 && cityName.length() < 30) {
+    saveCityNametoEEP(cityName);
+  }
+
+  // API Key
+  Serial.print("API Key length = ");
+  Serial.println(apiKey.length());
+  if (apiKey.length() > 0 && apiKey.length() < 40) {
+    saveApiKeytoEEP(apiKey);
+  }
+  tft.fillScreen(bgColor);
+  Web_win();
+  loadNum--;
+  loading(1);
+  if (EEPROM.read(BL_addr) != LCD_BL_PWM) {
+    EEPROM.write(BL_addr, LCD_BL_PWM);
+    EEPROM.commit();
+    delay(5);
+  }
+
+  // Screen brightness
+  Serial.printf("Brightness adjusted to: ");
+  analogWrite(LCD_BL_PIN, map(LCD_BL_PWM, 0, 100, 0, 255));
+  Serial.println(LCD_BL_PWM);
+
+  // Weather update time
+  Serial.printf("Weather update time adjusted to: ");
+  Serial.println(updateweater_time);
+}
+
 // WEB configuration function
 void Webconfig() {
   WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
@@ -480,297 +514,14 @@ void Webconfig() {
   while (!res);
 }
 
-String getParam(String name) {
-  // read parameter from server, for customhmtl input
-  String value;
-  if (wm.server->hasArg(name)) {
-    value = wm.server->arg(name);
-  }
-  return value;
-}
-
-void saveParamCallback() {
-  Serial.println("[CALLBACK] saveParamCallback fired");
-
-  // Save data obtained from the page
-  updateweater_time = getParam("WeaterUpdateTime").toInt();
-  cityName = getParam("CityName");
-  apiKey = getParam("APIKey");
-  LCD_BL_PWM = getParam("LCDBL").toInt();
-
-  // Process the obtained data
-  // City name
-  Serial.print("City Name = ");
-  Serial.println(cityName);
-  if (cityName.length() > 0 && cityName.length() < 30) {
-    saveCityNametoEEP(cityName);
-  }
-  
-  // API Key
-  Serial.print("API Key length = ");
-  Serial.println(apiKey.length());
-  if (apiKey.length() > 0 && apiKey.length() < 40) {
-    saveApiKeytoEEP(apiKey);
-  }
-  tft.setRotation(0);
-  tft.fillScreen(0x0000);
-  Web_win();
-  loadNum--;
-  loading(1);
-  if (EEPROM.read(BL_addr) != LCD_BL_PWM) {
-    EEPROM.write(BL_addr, LCD_BL_PWM);
-    EEPROM.commit();
-    delay(5);
-  }
-
-  // Screen brightness
-  Serial.printf("Brightness adjusted to: ");
-  analogWrite(LCD_BL_PIN, map(LCD_BL_PWM, 0, 100, 0, 255));
-  Serial.println(LCD_BL_PWM);
-
-  // Weather update time
-  Serial.printf("Weather update time adjusted to: ");
-  Serial.println(updateweater_time);
-}
-
-void LCD_reflash(int en) {
-  if (now() != prevDisplay || en == 1) {
-    prevDisplay = now();
-    digitalClockDisplay(en);
-    prevTime = 0;
-  }
-
-  // Update every two seconds
-  if ((second() % 2 == 0 && prevTime == 0) || en == 1) {
-    scrollBanner();
-  }
-
-  imgAnim();
-
-  if (millis() - weaterTime > (60000UL * updateweater_time) || en == 1 || UpdateWeater_en != 0) { // Update weather every 10 minutes
-    if (Wifi_en == 0) {
-      WiFi.forceSleepWake(); // wifi on
-      Serial.println("WIFI recovering......");
-      Wifi_en = 1;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      getWeatherDataFromOpenWeatherMap();
-      if (UpdateWeater_en != 0)
-        UpdateWeater_en = 0;
-      weaterTime = millis();
-      getNtpTime();
-#if !WebSever_EN
-      WiFi.forceSleepBegin(); // Wifi Off
-      Serial.println("WIFI sleeping......");
-      Wifi_en = 0;
-#endif
-    }
-  }
-}
-
-// Get weather data from OpenWeatherMap API
 String scrollText[5]; // Weather information storage
-void getWeatherDataFromOpenWeatherMap() {
-  if (apiKey.length() == 0) {
-    Serial.println("ERROR: API Key not set!");
-    return;
-  }
-  
-  if (cityName.length() == 0) {
-    cityName = "Saigon"; // Default city name
-  }
-
-  // OpenWeatherMap API endpoint - Current weather
-  String URL = "http://api.openweathermap.org/data/2.5/weather?q=" + cityName + 
-               "&appid=" + apiKey + 
-               "&units=metric&lang=" + weatherLang;
-  
-  // Create HTTPClient object
-  HTTPClient httpClient;
-  httpClient.begin(wificlient, URL);
-
-  // Start connection and send HTTP request
-  int httpCode = httpClient.GET();
-
-  // If server responds OK, parse JSON response
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = httpClient.getString();
-    
-  // Use DynamicJsonDocument with a suitable capacity for parsing the OpenWeatherMap response.
-  // Adjust the size (2048) if you encounter heap/memory issues or if the JSON payload is larger.
-    DynamicJsonDocument doc(2048);
-    DeserializationError error = deserializeJson(doc, payload);
-    
-    if (error) {
-      Serial.print("JSON parsing failed: ");
-      Serial.println(error.c_str());
-      httpClient.end();
-      return;
-    }
-
-    // Extract weather data
-    JsonObject weather = doc["weather"][0];
-    JsonObject main = doc["main"];
-    JsonObject wind = doc["wind"];
-    
-    String weatherDesc = weather["main"].as<String>();
-    int weatherCode = weather["id"].as<int>();
-    float temp = main["temp"].as<float>();
-    int humidity = main["humidity"].as<int>();
-    float temp_min = main["temp_min"].as<float>();
-    float temp_max = main["temp_max"].as<float>();
-    String cityNameResp = doc["name"].as<String>();
-    
-    if (cityNameResp.indexOf("Ho Chi Minh") != -1)
-      cityNameResp = "HCM";
-    
-    float windSpeed = wind["speed"].as<float>();
-    int windDeg = wind["deg"].as<int>();
-
-    /***Draw weather information on screen***/
-    clk.setColorDepth(8);
-    clk.loadFont(ZdyLwFont_20);
-
-    // Temperature
-    clk.createSprite(58, 24);
-    clk.fillSprite(bgColor);
-    clk.setTextDatum(CC_DATUM);
-    clk.setTextColor(TFT_WHITE, bgColor);
-    clk.drawString(String((int)temp) + "°C", 28, 13);
-    clk.pushSprite(100, 204);
-    clk.deleteSprite();
-    
-    tempnum = (int)temp + 10;
-    if (tempnum < 10)
-      tempcol = 0x00FF;
-    else if (tempnum < 28)
-      tempcol = 0x0AFF;
-    else if (tempnum < 34)
-      tempcol = 0x0F0F;
-    else if (tempnum < 41)
-      tempcol = 0xFF0F;
-    else if (tempnum < 49)
-      tempcol = 0xF00F;
-    else {
-      tempcol = 0xF00F;
-      tempnum = 50;
-    }
-    tempWin();
-
-    // Humidity
-    clk.createSprite(58, 24);
-    clk.fillSprite(bgColor);
-    clk.setTextDatum(CC_DATUM);
-    clk.setTextColor(TFT_WHITE, bgColor);
-    clk.drawString(String(humidity) + "%", 28, 13);
-    clk.pushSprite(100, 234);
-    clk.deleteSprite();
-    
-    huminum = humidity;
-    if (huminum > 90)
-      humicol = 0x00FF;
-    else if (huminum > 70)
-      humicol = 0x0AFF;
-    else if (huminum > 40)
-      humicol = 0x0F0F;
-    else if (huminum > 20)
-      humicol = 0xFF0F;
-    else
-      humicol = 0xF00F;
-    humidityWin();
-
-    // City name
-    clk.createSprite(94, 30);
-    clk.fillSprite(bgColor);
-    clk.setTextDatum(CC_DATUM);
-    clk.setTextColor(TFT_WHITE, bgColor);
-    clk.drawString(cityNameResp, 44, 16);
-    clk.pushSprite(15, 15);
-    clk.deleteSprite();
-
-    // Air Quality Index (simplified based on weather conditions)
-    uint16_t pm25BgColor = tft.color565(156, 202, 127); // Good
-    String aqiTxt = "G";
-    
-    // Simplified AQI based on weather conditions
-    if (weatherCode >= 200 && weatherCode < 300) { // Thunderstorm
-      pm25BgColor = tft.color565(242, 159, 57);
-      aqiTxt = "M";
-    } else if (weatherCode >= 300 && weatherCode < 600) { // Rain
-      pm25BgColor = tft.color565(156, 202, 127);
-      aqiTxt = "G";
-    } else if (weatherCode >= 700 && weatherCode < 800) { // Atmosphere (fog, mist, etc)
-      pm25BgColor = tft.color565(247, 219, 100);
-      aqiTxt = "F";
-    } else if (weatherCode == 800) { // Clear
-      pm25BgColor = tft.color565(156, 202, 127);
-      aqiTxt = "E";
-    }
-    
-    clk.createSprite(56, 24);
-    clk.fillSprite(bgColor);
-    clk.fillRoundRect(0, 0, 50, 24, 4, pm25BgColor);
-    clk.setTextDatum(CC_DATUM);
-    clk.setTextColor(0x0000);
-    clk.drawString(aqiTxt, 25, 13);
-    clk.pushSprite(104, 18);
-    clk.deleteSprite();
-
-    // Scrolling text information
-    scrollText[0] = "Now " + weatherDesc;
-    scrollText[1] = "Humidity " + String(humidity) + "%";
-    
-    // Wind direction
-    String windDir = "N";
-    if (windDeg >= 45 && windDeg < 135) windDir = "E";
-    else if (windDeg >= 135 && windDeg < 225) windDir = "S";
-    else if (windDeg >= 225 && windDeg < 315) windDir = "W";
-    scrollText[2] = "Wind " + windDir + " " + String(windSpeed, 1) + "m/s";
-    
-    // scrollText[3] = "Now " + weatherDesc;
-    scrollText[3] = "Min " + String((int)temp_min) + "°C";
-    scrollText[4] = "Max " + String((int)temp_max) + "°C";
-
-    // Weather icon (map OpenWeatherMap codes to existing icon codes)
-    int iconCode = 0;
-    if (weatherCode >= 200 && weatherCode < 300) iconCode = 4; // Thunderstorm
-    else if (weatherCode >= 300 && weatherCode < 400) iconCode = 7; // Drizzle
-    else if (weatherCode >= 500 && weatherCode < 600) iconCode = 8; // Rain
-    else if (weatherCode >= 600 && weatherCode < 700) iconCode = 14; // Snow
-    else if (weatherCode >= 701 && weatherCode < 800) iconCode = 18; // Fog/Mist
-    else if (weatherCode == 800) iconCode = 0; // Clear
-    else if (weatherCode > 800) iconCode = 1; // Clouds
-    
-    wrat.printfweather(170, 15, iconCode);
-
-    clk.unloadFont();
-    
-  } else {
-    Serial.print("Weather request failed: HTTP ");
-    Serial.println(httpCode);
-    
-    if (httpCode == 401) {
-      Serial.println("Invalid API Key - Wait 10-15 min or check: https://home.openweathermap.org/api_keys");
-    } else if (httpCode == 404) {
-      Serial.print("City not found: ");
-      Serial.println(cityName);
-    } else if (httpCode == -1) {
-      Serial.println("Connection failed - Check WiFi");
-    } else if (httpCode == 429) {
-      Serial.println("Too many requests - Rate limit exceeded");
-    }
-  }
-
-  httpClient.end();
-}
-
 int currentIndex = 0;
 TFT_eSprite clkb = TFT_eSprite(&tft);
+
 void scrollBanner() {
   if (scrollText[currentIndex]) {
     clkb.setColorDepth(8);
-    clkb.loadFont(ZdyLwFont_20);
+    clkb.loadFont(dateFont_20);
     clkb.createSprite(150, 30);
     clkb.fillSprite(bgColor);
     clkb.setTextWrap(false);
@@ -788,6 +539,386 @@ void scrollBanner() {
       currentIndex += 1; // Prepare to switch to next
   }
   prevTime = 1;
+}
+
+// Get weather data from OpenWeatherMap
+// Weather data cache
+struct WeatherData {
+  String cityName;
+  String countryCode;
+  String weatherDesc;
+  int weatherCode;
+  float temp;
+  int humidity;
+  float temp_feels;
+  float windSpeed;
+  int windDeg;
+  bool hasData;
+} weatherCache = {"", "", "", 0, 0, 0, 0, 0, 0, false};
+
+void getWeatherData() {
+  if (apiKey.length() == 0) {
+    Serial.println("ERROR: API Key not set!");
+    return;
+  }
+
+  // OpenWeatherMap API endpoint - Current weather
+  String URL = "http://api.openweathermap.org/data/2.5/weather?q=" + cityName +
+               "&appid=" + apiKey +
+               "&units=metric&lang=" + weatherLang;
+
+  // Create HTTPClient object
+  HTTPClient httpClient;
+  httpClient.begin(wificlient, URL);
+
+  // Start connection and send HTTP request
+  int httpCode = httpClient.GET();
+
+  // If server responds OK, parse JSON response
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = httpClient.getString();
+
+    // Use DynamicJsonDocument, adjust the size (2048)
+    DynamicJsonDocument doc(2048);
+    DeserializationError error = deserializeJson(doc, payload);
+
+    if (error) {
+      Serial.print("JSON parsing failed: ");
+      Serial.println(error.c_str());
+      httpClient.end();
+      return;
+    }
+
+    // Extract weather data - ONLY PARSE, DON'T DRAW YET
+    JsonObject weather = doc["weather"][0];
+    JsonObject main = doc["main"];
+    JsonObject wind = doc["wind"];
+    JsonObject sys = doc["sys"];
+
+    weatherCache.weatherDesc = weather["main"].as<String>();
+    weatherCache.weatherCode = weather["id"].as<int>();
+    weatherCache.temp = main["temp"].as<float>();
+    weatherCache.humidity = main["humidity"].as<int>();
+    weatherCache.temp_feels = main["feels_like"].as<float>();
+    weatherCache.cityName = doc["name"].as<String>();
+
+    if (weatherCache.cityName.indexOf("Ho Chi Minh") != -1)
+      weatherCache.cityName = "HCM";
+
+    weatherCache.countryCode = sys["country"].as<String>();
+    weatherCache.windSpeed = wind["speed"].as<float>();
+    weatherCache.windDeg = wind["deg"].as<int>();
+    weatherCache.hasData = true;
+
+    Serial.println("Weather data fetched successfully");
+    
+    // Prepare scroll text data
+    scrollText[0] = "Now " + weatherCache.weatherDesc;
+    scrollText[1] = "Temp " + String((int)weatherCache.temp) + "°C";
+    scrollText[2] = "Feels like " + String((int)weatherCache.temp_feels) + "°C";
+    scrollText[3] = "Humidity " + String(weatherCache.humidity) + "%";
+
+    // Wind direction
+    String windDir = "N";
+    if (weatherCache.windDeg >= 45 && weatherCache.windDeg < 135)
+      windDir = "E";
+    else if (weatherCache.windDeg >= 135 && weatherCache.windDeg < 225)
+      windDir = "S";
+    else if (weatherCache.windDeg >= 225 && weatherCache.windDeg < 315)
+      windDir = "W";
+    scrollText[4] = "Wind " + windDir + " " + String(weatherCache.windSpeed, 1) + "m/s";
+
+  } else {
+    Serial.print("Weather request failed: HTTP ");
+    Serial.println(httpCode);
+  }
+
+  httpClient.end();
+}
+
+// Update weather display from cache
+// Previous displayed values for change detection
+struct WeatherDisplayCache {
+  String cityName;
+  String countryCode;
+  int weatherCode;
+  int temp;
+  int humidity;
+  bool initialized;
+} prevWeatherDisplay = {"", "", -1, -999, -999, false};
+
+void updateWeatherDisplay() {
+  if (!weatherCache.hasData) return;
+  
+  int currentTemp = (int)weatherCache.temp;
+  int currentHumidity = weatherCache.humidity;
+  bool needUpdate = false;
+  
+  // Check if anything changed
+  if (!prevWeatherDisplay.initialized ||
+      prevWeatherDisplay.cityName != weatherCache.cityName ||
+      prevWeatherDisplay.countryCode != weatherCache.countryCode ||
+      prevWeatherDisplay.weatherCode != weatherCache.weatherCode ||
+      prevWeatherDisplay.temp != currentTemp ||
+      prevWeatherDisplay.humidity != currentHumidity) {
+    needUpdate = true;
+  }
+  
+  if (!needUpdate) return; // Nothing changed, skip drawing
+  
+  clk.setColorDepth(8);
+  clk.loadFont(dateFont_20);
+  
+  // Update City name (only if changed)
+  if (!prevWeatherDisplay.initialized || 
+      prevWeatherDisplay.cityName != weatherCache.cityName) {
+    clk.createSprite(94, 30);
+    clk.fillSprite(bgColor);
+    clk.setTextDatum(CC_DATUM);
+    clk.setTextColor(TFT_WHITE, bgColor);
+    clk.drawString(weatherCache.cityName, 44, 16);
+    clk.pushSprite(15, 15);
+    clk.deleteSprite();
+    Serial.println("cityName updated");
+  }
+
+  // Update Country Code (only if country code changed)
+  if (!prevWeatherDisplay.initialized || 
+      prevWeatherDisplay.countryCode != weatherCache.countryCode) {
+
+    clk.createSprite(56, 24);
+    clk.fillSprite(bgColor);
+    clk.fillRoundRect(0, 0, 50, 24, 4, 0x9E67); // Light green RGB565 (RGB: 156, 202, 127)
+    clk.setTextDatum(CC_DATUM);
+    clk.setTextColor(0x0000);
+    clk.drawString(weatherCache.countryCode, 25, 13);
+    clk.pushSprite(104, 18);
+    clk.deleteSprite();
+    Serial.println("Country code updated");
+  }
+
+  // Update Weather Icon (only if weather code changed)
+  if (!prevWeatherDisplay.initialized ||
+      prevWeatherDisplay.weatherCode != weatherCache.weatherCode) {
+
+    // Weather icon
+    int iconCode = 0;
+    if (weatherCache.weatherCode >= 200 && weatherCache.weatherCode < 300)
+      iconCode = 4;
+    else if (weatherCache.weatherCode >= 300 && weatherCache.weatherCode < 400)
+      iconCode = 7;
+    else if (weatherCache.weatherCode >= 500 && weatherCache.weatherCode < 600)
+      iconCode = 8;
+    else if (weatherCache.weatherCode >= 600 && weatherCache.weatherCode < 700)
+      iconCode = 14;
+    else if (weatherCache.weatherCode >= 701 && weatherCache.weatherCode < 800)
+      iconCode = 18;
+    else if (weatherCache.weatherCode == 800)
+      iconCode = 0;
+    else if (weatherCache.weatherCode > 800)
+      iconCode = 1;
+
+    wrat.printfweather(170, 15, iconCode);
+    Serial.println("Weather icon updated");
+  }
+
+  // Update Temperature (only if changed)
+  if (!prevWeatherDisplay.initialized || 
+      prevWeatherDisplay.temp != currentTemp) {
+    
+    clk.createSprite(58, 24);
+    clk.fillSprite(bgColor);
+    clk.setTextDatum(CC_DATUM);
+    clk.setTextColor(TFT_WHITE, bgColor);
+    clk.drawString(String(currentTemp) + "°C", 28, 13);
+    clk.pushSprite(100, 210);
+    clk.deleteSprite();
+
+    tempnum = currentTemp + 10;
+    if (tempnum < 10)
+      tempcol = 0x00FF;
+    else if (tempnum < 28)
+      tempcol = 0x0AFF;
+    else if (tempnum < 34)
+      tempcol = 0x0F0F;
+    else if (tempnum < 41)
+      tempcol = 0xFF0F;
+    else if (tempnum < 49)
+      tempcol = 0xF00F;
+    else {
+      tempcol = 0xF00F;
+      tempnum = 50;
+    }
+    tempWin();
+    Serial.println("Temperature updated");
+  }
+
+  // Update Humidity (only if changed)
+  if (!prevWeatherDisplay.initialized || 
+      prevWeatherDisplay.humidity != currentHumidity) {
+    
+    clk.createSprite(58, 24);
+    clk.fillSprite(bgColor);
+    clk.setTextDatum(CC_DATUM);
+    clk.setTextColor(TFT_WHITE, bgColor);
+    clk.drawString(String(currentHumidity) + "%", 28, 13);
+    clk.pushSprite(100, 240);
+    clk.deleteSprite();
+
+    huminum = currentHumidity;
+    if (huminum > 90)
+      humicol = 0x00FF;
+    else if (huminum > 70)
+      humicol = 0x0AFF;
+    else if (huminum > 40)
+      humicol = 0x0F0F;
+    else if (huminum > 20)
+      humicol = 0xFF0F;
+    else
+      humicol = 0xF00F;
+    humidityWin();
+    Serial.println("Humidity updated");
+  }
+
+  clk.unloadFont();
+  
+  // Update cache
+  prevWeatherDisplay.cityName = weatherCache.cityName;
+  prevWeatherDisplay.countryCode = weatherCache.countryCode;
+  prevWeatherDisplay.weatherCode = weatherCache.weatherCode;
+  prevWeatherDisplay.temp = currentTemp;
+  prevWeatherDisplay.humidity = currentHumidity;
+  prevWeatherDisplay.initialized = true;  
+}
+
+// Week
+String week() {
+  String wk[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  String s = wk[weekday() - 1];
+  return s;
+}
+
+// Day/Month/Year with zero padding (DD/MM/YYYY)
+String monthDay() {
+  String d = (day() < 10) ? "0" + String(day()) : String(day());
+  String m = (month() < 10) ? "0" + String(month()) : String(month());
+  String s = d + "/" + m + "/" + year();
+  return s;
+}
+
+// Digital clock display function
+// Cache for date display
+unsigned char Hour_sign = 60;
+unsigned char Minute_sign = 60;
+unsigned char Second_sign = 60;
+static String prev_week = "";
+static String prev_monthDay = "";
+int timey = 90;
+
+void digitalClockDisplay(int reflash_en) {
+  if (hour() != Hour_sign || reflash_en == 1) {
+    clk.setColorDepth(8);
+    clk.loadFont(timeFont_85);
+    
+    clk.createSprite(88, 70);
+    clk.fillSprite(bgColor);
+    clk.setTextDatum(TC_DATUM);
+    clk.setTextColor(TFT_RED, bgColor);
+    
+    String hourStr = (hour() < 10) ? "0" + String(hour()) : String(hour());
+    clk.drawString(hourStr, 44, 0);
+    clk.pushSprite(8, timey);
+    clk.deleteSprite();
+    clk.unloadFont();
+    
+    Hour_sign = hour();
+    Serial.println("Hour updated");
+  }
+  
+  if (minute() != Minute_sign || reflash_en == 1) {
+    clk.setColorDepth(8);
+    clk.loadFont(timeFont_85);
+    
+    clk.createSprite(88, 70);
+    clk.fillSprite(bgColor);
+    clk.setTextDatum(TC_DATUM);
+    clk.setTextColor(TFT_ORANGE, bgColor);
+    
+    String minuteStr = (minute() < 10) ? "0" + String(minute()) : String(minute());
+    clk.drawString(minuteStr, 44, 0);
+    clk.pushSprite(93, timey);
+    clk.deleteSprite();
+    clk.unloadFont();
+    
+    Minute_sign = minute();
+    
+    // Display free RAM every minute
+    uint32_t freeHeap = ESP.getFreeHeap();
+    Serial.print("Minute updated | Free RAM: ");
+    Serial.print(freeHeap);
+    Serial.println(" bytes");
+  }
+  
+  if (second() != Second_sign || reflash_en == 1) {
+    clk.setColorDepth(8);
+    clk.loadFont(timeFont_42);
+
+    clk.createSprite(44, 40);
+    clk.fillSprite(bgColor);
+    clk.setTextDatum(TC_DATUM);
+    clk.setTextColor(TFT_SKYBLUE, bgColor);
+
+    String secondStr = (second() < 10) ? "0" + String(second()) : String(second());
+    clk.drawString(secondStr, 22, 0);
+    clk.pushSprite(181, timey+30);
+    clk.deleteSprite();
+    clk.unloadFont();
+
+    Second_sign = second();
+  }
+
+  /***Date - Only update when changed***/ 
+  String current_week = week();
+  String current_monthDay = monthDay();
+  
+  // Check if date changed or forced refresh
+  if (current_week != prev_week || reflash_en == 1) {
+    clk.setColorDepth(8);
+    clk.loadFont(dateFont_20);
+    
+    // Day of week
+    clk.createSprite(64, 30);
+    clk.fillSprite(bgColor);
+    clk.setTextDatum(CC_DATUM);
+    clk.setTextColor(TFT_VIOLET, bgColor);
+    clk.drawString(current_week, 32, 16);
+    clk.pushSprite(130, 170);
+    clk.deleteSprite();
+    
+    clk.unloadFont();
+    prev_week = current_week;
+    Serial.println("Week updated");
+  }
+  
+  // Update day/month/year only when changed
+  if (current_monthDay != prev_monthDay || reflash_en == 1) {
+    clk.setColorDepth(8);
+    clk.loadFont(dateFont_20);
+    
+    // Day/Month/Year - Increased width to 130 for full date display
+    clk.createSprite(130, 30);
+    clk.fillSprite(bgColor);
+    clk.setTextDatum(CC_DATUM);
+    clk.setTextColor(TFT_WHITE, bgColor);
+    clk.drawString(current_monthDay, 65, 16);
+    clk.pushSprite(15, 170);
+    clk.deleteSprite();
+    
+    clk.unloadFont();
+    prev_monthDay = current_monthDay;
+    Serial.println("Date updated");
+  }
+  /***Date****/
 }
 
 void imgAnim() {
@@ -837,127 +968,28 @@ void imgAnim() {
   }
 }
 
-unsigned char Hour_sign = 60;
-unsigned char Minute_sign = 60;
-unsigned char Second_sign = 60;
-void digitalClockDisplay(int reflash_en) {
-  int timey = 90;
-  if (hour() != Hour_sign || reflash_en == 1) // Clock refresh
-  {
-    dig.printfW3660(20, timey, hour() / 10);
-    dig.printfW3660(60, timey, hour() % 10);
-    Hour_sign = hour();
-  }
-  if (minute() != Minute_sign || reflash_en == 1) // Minute refresh
-  {
-    dig.printfO3660(101, timey, minute() / 10);
-    dig.printfO3660(141, timey, minute() % 10);
-    Minute_sign = minute();
-  }
-  if (second() != Second_sign || reflash_en == 1) // Second refresh
-  {
-    dig.printfW1830(182, timey + 30, second() / 10);
-    dig.printfW1830(202, timey + 30, second() % 10);
-    Second_sign = second();
+void LCD_reflash(int en) {
+  updateWeatherDisplay();
+
+  if (now() != prevDisplay || en == 1) {
+    prevDisplay = now();
+    digitalClockDisplay(en);
+    prevTime = 0;
   }
 
-  if (reflash_en == 1)
-    reflash_en = 0;
-  /***Date****/
-  clk.setColorDepth(8);
-  clk.loadFont(ZdyLwFont_20);
-
-  // Day of week
-  clk.createSprite(58, 30);
-  clk.fillSprite(bgColor);
-  clk.setTextDatum(CC_DATUM);
-  clk.setTextColor(TFT_WHITE, bgColor);
-  clk.drawString(week(), 29, 16);
-  clk.pushSprite(125, 170);
-  clk.deleteSprite();
-
-  // Day/Month/Year
-  clk.createSprite(110, 30);
-  clk.fillSprite(bgColor);
-  clk.setTextDatum(CC_DATUM);
-  clk.setTextColor(TFT_WHITE, bgColor);
-  clk.drawString(monthDay(), 55, 16);
-  clk.pushSprite(15, 170);
-  clk.deleteSprite();
-
-  clk.unloadFont();
-  /***Date****/
-}
-
-// Week
-String week() {
-  String wk[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-  String s = wk[weekday() - 1];
-  return s;
-}
-
-// Day/Month/Year
-String monthDay() {
-  String s = String(day());
-  s = s + "/" + month() + "/" + year();
-  return s;
-}
-
-/*-------- NTP code ----------*/
-const int NTP_PACKET_SIZE = 48;     // NTP time is in the first 48 bytes of the message
-byte packetBuffer[NTP_PACKET_SIZE]; // buffer to hold incoming & outgoing packets
-time_t getNtpTime() {
-  IPAddress ntpServerIP; // NTP server's ip address
-
-  while (Udp.parsePacket() > 0);
-  //  get a random server from the pool
-  WiFi.hostByName(ntpServerName, ntpServerIP);
-  sendNTPpacket(ntpServerIP);
-  uint32_t beginWait = millis();
-  while (millis() - beginWait < 1500) {
-    int size = Udp.parsePacket();
-    if (size >= NTP_PACKET_SIZE) {
-      Serial.println("Receive NTP Response");
-      Udp.read(packetBuffer, NTP_PACKET_SIZE); // read packet into the buffer
-      unsigned long secsSince1900;
-      // convert four bytes starting at location 40 to a long integer
-      secsSince1900 = (unsigned long)packetBuffer[40] << 24;
-      secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
-      secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
-      secsSince1900 |= (unsigned long)packetBuffer[43];
-      // Serial.println(secsSince1900 - 2208988800UL + timeZone * SECS_PER_HOUR);
-      return secsSince1900 - 2208988800UL + timeZone * SECS_PER_HOUR;
-    }
+  // Update every two seconds
+  if ((second() % 2 == 0 && prevTime == 0) || en == 1) {
+    scrollBanner();
   }
-  Serial.println("No NTP Response :-(");
-  return 0; // Return 0 when unable to get time
-}
 
-// Send request to NTP server
-void sendNTPpacket(IPAddress &address) {
-  // set all bytes in the buffer to 0
-  memset(packetBuffer, 0, NTP_PACKET_SIZE);
-  // Initialize values needed to form NTP request
-  // (see URL above for details on the packets)
-  packetBuffer[0] = 0b11100011; // LI, Version, Mode
-  packetBuffer[1] = 0;          // Stratum, or type of clock
-  packetBuffer[2] = 6;          // Polling Interval
-  packetBuffer[3] = 0xEC;       // Peer Clock Precision
-  // 8 bytes of zero for Root Delay & Root Dispersion
-  packetBuffer[12] = 49;
-  packetBuffer[13] = 0x4E;
-  packetBuffer[14] = 49;
-  packetBuffer[15] = 52;
-  // all NTP fields have been given values, now
-  // you can send a packet requesting a timestamp:
-  Udp.beginPacket(address, 123); // NTP requests are to port 123
-  Udp.write(packetBuffer, NTP_PACKET_SIZE);
-  Udp.endPacket();
+  imgAnim();
 }
 
 void setup() {
   Serial.begin(115200);
   Serial.println("");
+  Serial.println("Astronaut Weather Station");
+
   EEPROM.begin(1024);
   pinMode(LCD_BL_PIN, OUTPUT);
 
@@ -966,23 +998,21 @@ void setup() {
     LCD_BL_PWM = EEPROM.read(BL_addr);
 
   // Read weather update time from eeprom
-  updateweater_time = EEPROM.read(UpWeT_addr);
+  // if (EEPROM.read(UpWeT_addr) > 0 && EEPROM.read(UpWeT_addr) <= 60)
+  //   updateweater_time = EEPROM.read(UpWeT_addr);
 
   tft.begin();
-  tft.setRotation(0);
   analogWrite(LCD_BL_PIN, map(LCD_BL_PWM, 0, 100, 0, 255));
-  tft.fillScreen(0x0000);
-  tft.setTextColor(TFT_BLACK, bgColor);
-
-  targetTime = millis() + 1000;
-  readwificonfig(); // Read stored wifi information
-  Serial.print("Connecting to WIFI ");
-  Serial.println(wificonf.stassid);
-  WiFi.begin(wificonf.stassid, wificonf.stapsw);
+  tft.fillScreen(bgColor);
 
   TJpgDec.setJpgScale(1);
   TJpgDec.setSwapBytes(true);
   TJpgDec.setCallback(tft_output);
+
+  readwificonfig();
+  Serial.print("Connecting to ");
+  Serial.println(wificonf.stassid);
+  WiFi.begin(wificonf.stassid, wificonf.stapsw);
 
   while (WiFi.status() != WL_CONNECTED) {
     loading(30);
@@ -992,7 +1022,6 @@ void setup() {
       break;
     }
   }
-
   delay(10);
   while (loadNum < 194) loading(1); // Let animation complete
 
@@ -1000,50 +1029,50 @@ void setup() {
     strcpy(wificonf.stassid, WiFi.SSID().c_str()); // Name copy
     strcpy(wificonf.stapsw, WiFi.psk().c_str());   // Password copy
     savewificonfig();
-    readwificonfig();
 #if WebSever_EN
-    // Start web server initialization
     Web_Sever_Init();
-    Web_sever_Win();
+    Web_sever_Win(); // Start webserver initialization
     delay(1000);
 #endif
   }
 
-  Serial.println("Starting UDP");
-  Udp.begin(localPort);
-  Serial.println("Waiting for sync...");
-  setSyncProvider(getNtpTime);
-  setSyncInterval(300);
-
-  TJpgDec.setJpgScale(1);
-  TJpgDec.setSwapBytes(true);
-  TJpgDec.setCallback(tft_output);
+  Serial.println("Initializing NTP client...");
+  timeClient.begin();
+  
+  // Try to sync time
+  bool ntpSuccess = false;
+  for (int i = 0; i < 10; ++i) {
+    if (timeClient.update()) {
+      ntpSuccess = true;
+      Serial.println("NTP sync successful");
+      break;
+    }
+    delay(1000);
+  }
+  
+  if (!ntpSuccess) {
+    Serial.println("NTP sync failed, will retry later");
+  }
 
   // Read saved city name and API key from EEPROM
   readCityNamefromEEP();
   readApiKeyfromEEP();
-  
-  // Set defaults if not configured
-  if (cityName.length() == 0) {
-    cityName = "Hanoi";
-  }
-  
-  if (apiKey.length() == 0 || apiKey.length() < 32) {
-    Serial.println("WARNING: API Key not configured!");
-    Serial.println("Get free key at: https://openweathermap.org/api");
-  }
 
-  tft.fillScreen(TFT_BLACK); // Clear screen
+  tft.fillScreen(TFT_BLACK);
+  Serial.println("Getting weather data...");
+  getWeatherData();
+  // updateWeatherDisplay();
 
-  TJpgDec.drawJpg(15, 203, temperature, sizeof(temperature)); // Temperature icon
-  TJpgDec.drawJpg(15, 233, humidity, sizeof(humidity));       // Humidity icon
-
-  getWeatherDataFromOpenWeatherMap();
 #if !WebSever_EN
   WiFi.forceSleepBegin(); // wifi off
   Serial.println("WIFI sleeping......");
   Wifi_en = 0;
 #endif
+
+  TJpgDec.drawJpg(15, 209, temperature, sizeof(temperature)); // Temperature icon
+  TJpgDec.drawJpg(15, 239, humidity, sizeof(humidity));       // Humidity icon
+
+  weatherTime = millis();
 }
 
 void loop() {
@@ -1051,4 +1080,34 @@ void loop() {
   Web_Sever();
 #endif
   LCD_reflash(0);
+
+  if (millis() - weatherTime > (60000UL * updateweater_time)) {
+    if (Wifi_en == 0) {
+      WiFi.forceSleepWake(); // wifi on
+      Serial.println("WIFI recovering......");
+      Wifi_en = 1;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      getWeatherData();
+      weatherUpdateCount++;
+
+      // Sync NTP only every 3 weather updates
+      if (weatherUpdateCount >= 3) {
+        if (timeClient.update()) {
+          Serial.println("NTP sync successful");
+        } else {
+          Serial.println("NTP sync failed");
+        }
+        weatherUpdateCount = 0;
+      }
+
+#if !WebSever_EN
+      WiFi.forceSleepBegin(); // Wifi Off
+      Serial.println("WIFI sleeping......");
+      Wifi_en = 0;
+#endif
+      weatherTime = millis();
+    }
+  }
 }
