@@ -7,7 +7,7 @@
         "type_traits": "cpp",
         "utility": "cpp"
     },
-    "idf.pythonInstallPath": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+    "idf.pythonInstallPath": "C:\\Users\\NguyenThanhDat\\.espressif\\tools\\idf-python\\3.11.2\\python.exe",
     "C_Cpp.clang_format_style": "{ BreakBeforeBraces: Attach, ColumnLimit: 0, SortIncludes: false }",
     "cmake.ignoreCMakeListsMissing": true,
     "idf.showOnboardingOnInit": false,

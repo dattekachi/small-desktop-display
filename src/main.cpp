@@ -497,7 +497,7 @@ struct WeatherData {
   float windSpeed;
   int windDeg;
   bool hasData;
-} weatherCache = {"", "", "", "", 0, 0, 0, 0, 0, 0, false};
+} weatherCache = {"NULL", "NULL", "NULL", "NULL", 0, 0, 0, 0, 0, 0, false};
 
 void getWeatherData() {
   if (apiKey.length() == 0) {
@@ -540,6 +540,9 @@ void getWeatherData() {
 
     weatherCache.weatherDesc = capitalizeWords(weather["description"].as<String>());
     weatherCache.weatherStatus = weather["main"].as<String>();
+    if (weatherCache.weatherStatus.indexOf("Thunderstorm") != -1) {
+      weatherCache.weatherStatus = "T-Storm";
+    }
     weatherCache.weatherCode = weather["id"].as<int>();
     weatherCache.temp = main["temp"].as<float>();
     weatherCache.humidity = main["humidity"].as<int>();
