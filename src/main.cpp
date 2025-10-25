@@ -541,7 +541,7 @@ void getWeatherData() {
     weatherCache.weatherDesc = capitalizeWords(weather["description"].as<String>());
     weatherCache.weatherStatus = weather["main"].as<String>();
     if (weatherCache.weatherStatus.indexOf("Thunderstorm") != -1) {
-      weatherCache.weatherStatus = "T-Storm";
+      weatherCache.weatherStatus = "Storm";
     }
     weatherCache.weatherCode = weather["id"].as<int>();
     weatherCache.temp = main["temp"].as<float>();
